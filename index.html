@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FactBot AI — AI Fact Checker</title>
+<meta name="description" content="Paste any statement or upload a CSV file and let AI fact-check it against Wikipedia in seconds.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="logo" href="#">
+      <span class="logo-badge">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+      </span>
+      <span class="logo-text">FactBot <em>AI</em></span>
+    </a>
+    <nav class="nav">
+      <a href="#checker">Fact Checker</a>
+      <a href="#how">How it works</a>
+      <a class="nav-cta" href="https://github.com" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="hero">
+    <div class="hero-badge"><span class="dot"></span> Powered by Wikipedia + AI verification</div>
+    <h1>Fact-check any statement<br>in <span class="grad">seconds</span></h1>
+    <p class="sub">Paste text or upload a CSV file. FactBot AI verifies every claim against Wikipedia and shows you what's true, what's false — and the correct info.</p>
+  </section>
+
+  <section class="card" id="checker">
+    <label class="card-label" for="inputText">Original text</label>
+    <textarea id="inputText" placeholder="Paste your text here - English, Spanish or Portuguese" rows="7" spellcheck="false"></textarea>
+
+    <div class="actions">
+      <button class="pill" id="sampleBtn" type="button">
+        <span>Try a sample</span>
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 3l1.6 5.4L18 10l-5.4 1.6L11 17l-1.6-5.4L4 10l5.4-1.6L11 3z"/><path d="M18.5 15l.8 2.7 2.7.8-2.7.8-.8 2.7-.8-2.7-2.7-.8 2.7-.8.8-2.7z"/></svg>
+      </button>
+      <button class="pill" id="pasteBtn" type="button">
+        <span>Paste here</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>
+      </button>
+      <button class="pill" id="uploadBtn" type="button">
+        <span>Upload file</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/></svg>
+      </button>
+      <input type="file" id="fileInput" accept=".txt,.csv,text/plain,text/csv" hidden>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="card-foot">
+      <div class="foot-left">
+        <span id="wordCount">Words: 0 / 3,000</span>
+        <span class="terms">By fact-checking, you agree to our <a href="#" id="termsLink">Terms</a>.</span>
+      </div>
+      <button class="big-btn" id="checkBtn" type="button" disabled>Fact Check</button>
+    </div>
+
+    <div class="progress-wrap" id="progressWrap" hidden>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <p class="progress-text" id="progressText">Checking…</p>
+    </div>
+  </section>
+
+  <section class="results" id="results" hidden>
+    <div class="score-card">
+      <div class="ring-wrap">
+        <svg viewBox="0 0 120 120" class="ring">
+          <circle class="ring-bg" cx="60" cy="60" r="52"/>
+          <circle class="ring-fg" id="ringFg" cx="60" cy="60" r="52"/>
+        </svg>
+        <div class="ring-center"><span id="scorePct">0%</span><small>Truth Score</small></div>
+      </div>
+      <div class="score-meta">
+        <h2 id="scoreTitle">Fact-check complete</h2>
+        <p id="scoreSub"></p>
+        <div class="chips">
+          <span class="chip true" id="chipTrue">✓ 0 True</span>
+          <span class="chip false" id="chipFalse">✗ 0 False</span>
+          <span class="chip skip" id="chipSkip">– 0 Skipped</span>
+        </div>
+        <button class="ghost-btn" id="copyBtn" type="button">Copy report</button>
+      </div>
+    </div>
+
+    <div id="falseList"></div>
+    <div id="trueList"></div>
+    <div id="skipList"></div>
+  </section>
+
+  <section class="how" id="how">
+    <h2>How it works</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <h3>Paste or upload</h3>
+        <p>Type a statement, paste a paragraph, or upload a <code>.txt</code> / <code>.csv</code> file with claims to verify.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <h3>AI finds the subject</h3>
+        <p>FactBot identifies the encyclopedic subject of each claim and pulls the real facts from Wikipedia.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <h3>Get a Truth Score</h3>
+        <p>Every verifiable claim is marked <b>True</b> or <b>False</b> with the correct info — plus an overall Truth Score.</p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <p>FactBot AI · Built with the Wikipedia API · Free &amp; open source</p>
+</footer>
+
+<div class="modal" id="termsModal" hidden>
+  <div class="modal-card">
+    <h3>Terms of use</h3>
+    <p>FactBot AI is a demo fact-checking tool. Results are generated by comparing claims against Wikipedia summaries and are provided for educational purposes only — always verify important facts with primary sources.</p>
+    <p>By using this tool you agree to use it responsibly and not rely on it as the sole source of truth.</p>
+    <button class="big-btn small" id="termsClose" type="button">Close</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="script.js"></script>
+</body>
+</html>
