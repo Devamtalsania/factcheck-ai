@@ -71,6 +71,37 @@ function stem(w) {
   return w;
 }
 
+/* ---------- Wikipedia full-text search (same API the Python wikipedia library uses) ---------- */
+async function searchWikipedia(query) {
+  const url =
+    "https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=10&origin=*" +
+    "&srsearch=" + encodeURIComponent(query);
+  const data = await fetchJSON(url);
+  return (data.query && data.query.search || []).map((r) => r.title);
+}
+
+/* ---------- Score one candidate article against the user's sentence ---------- */
+function evaluateCandidate(candidate, words, stemmedWordSet) {
+  const subjectWords = new Set(
+    (candidate.toLowerCase().match(/\w+/g) || []).filter((w) => w.length >= 3 && !GENERIC_TITLE_WORDS.has(w))
+  );
+  if (subjectWords.size === 0) return null;
+  const subjectStems = new Set([...subjectWords].map(stem));
+  const sharedCount = [...subjectStems].filter((s) => stemmedWordSet.has(s)).length;
+  const isFullMatch = sharedCount === subjectStems.size;
+  // Short sentences get a partial-match allowance (e.g. "Dhyan is president"
+  // should still match "President of India"); longer ones stay strict.
+  if (!isFullMatch && !(words.length <= 5 && sharedCount >= 1)) return null;
+
+  // Extract the user's claim words
+  const claimWords = new Set(
+    words.filter((w) => w.length >= 2 && !STOPWORDS.has(w) && !subjectStems.has(stem(w)))
+  );
+  if (claimWords.size === 0) return null;
+
+  return { candidate, claimWords, sharedCount, coverage: sharedCount / subjectStems.size };
+}
+
 /* ---------- Core: verify one statement (port of verify_single_statement) ---------- */
 async function verifySingleStatement(sentence) {
   const clean = sentence.trim();
@@ -93,53 +124,51 @@ async function verifySingleStatement(sentence) {
   }
 
   try {
-    // 2. Search Wikipedia (full-text search, same as the Python wikipedia library)
-    //    Try the top 10 results, not just the first
-    const searchUrl =
-      "https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=10&origin=*" +
-      "&srsearch=" + encodeURIComponent(clean);
-    const searchData = await fetchJSON(searchUrl);
-    const candidates = (searchData.query && searchData.query.search || []).map((r) => r.title);
+    // 2. Search Wikipedia and rank candidates by how much of the article title
+    //    actually appears in the sentence (best subject match wins)
+    const candidates = await searchWikipedia(clean);
     if (candidates.length === 0) {
       return { statement: clean, status: "NOT_WORTHY", reason: "No recognizable encyclopedic subject found." };
     }
 
     const stemmedWordSet = new Set(words.map(stem));
+    const rank = (list) =>
+      list
+        .map((c) => evaluateCandidate(c, words, stemmedWordSet))
+        .filter(Boolean)
+        .sort((a, b) => b.coverage - a.coverage || b.sharedCount - a.sharedCount);
 
-    for (const candidate of candidates) {
-      // 3. Subject words must appear in the user's sentence (plurals tolerated)
-      const subjectWords = new Set(
-        (candidate.toLowerCase().match(/\w+/g) || []).filter((w) => w.length >= 3 && !GENERIC_TITLE_WORDS.has(w))
-      );
-      if (subjectWords.size === 0) continue;
-      const subjectStems = new Set([...subjectWords].map(stem));
-      const sharedCount = [...subjectStems].filter((s) => stemmedWordSet.has(s)).length;
-      const isFullMatch = sharedCount === subjectStems.size;
-      // Short sentences get a partial-match allowance (e.g. "Dhyan is president"
-      // should still match "President of India"); longer ones stay strict.
-      if (!isFullMatch && !(words.length <= 5 && sharedCount >= 1)) continue;
+    let ranked = rank(candidates);
 
-      // 4. Extract the user's claim words
-      const claimWords = new Set(
-        words.filter((w) => w.length >= 2 && !STOPWORDS.has(w) && !subjectStems.has(stem(w)))
-      );
-      if (claimWords.size === 0) continue;
+    // 3. If the best match is only a single-word subject (e.g. "India"), the real
+    //    subject may be a phrase the search missed (e.g. "President of India").
+    //    Search again without the first content word and merge the results.
+    if (!ranked[0] || ranked[0].sharedCount < 2) {
+      const contentWords = words.filter((w) => !STOPWORDS.has(w));
+      if (contentWords.length >= 2) {
+        const extra = await searchWikipedia(contentWords.slice(1).join(" "));
+        const merged = [...candidates, ...extra.filter((c) => !candidates.includes(c))];
+        ranked = rank(merged);
+      }
+    }
 
+    // 4. Try the best-ranked candidates until one yields a verdict
+    for (const entry of ranked) {
       // 5. Fetch real facts (Wikipedia summary, first 3 sentences)
       const summaryUrl =
-        "https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(candidate.replace(/ /g, "_"));
+        "https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(entry.candidate.replace(/ /g, "_"));
       const summary = await fetchJSON(summaryUrl);
       if (summary.type === "disambiguation" || !summary.extract) continue;
 
       const realFacts = firstSentences(summary.extract, 3);
       const realWords = new Set(realFacts.toLowerCase().match(/\w+/g) || []);
-      const matching = [...claimWords].filter((w) => realWords.has(w));
-      const accuracy = matching.length / claimWords.size;
+      const matching = [...entry.claimWords].filter((w) => realWords.has(w));
+      const accuracy = matching.length / entry.claimWords.size;
 
       if (accuracy >= 0.35) {
-        return { statement: clean, status: "TRUE", subject: candidate };
+        return { statement: clean, status: "TRUE", subject: entry.candidate };
       }
-      return { statement: clean, status: "FALSE", subject: candidate, correct_info: realFacts };
+      return { statement: clean, status: "FALSE", subject: entry.candidate, correct_info: realFacts };
     }
 
     return { statement: clean, status: "NOT_WORTHY", reason: "Statement lacks a clear, specific subject to fact-check." };
@@ -209,7 +238,7 @@ async function runCheck() {
     $("progressFill").style.width = Math.round(((i + 1) / sentences.length) * 100) + "%";
     $("progressText").textContent = `Checking statement ${i + 1} of ${sentences.length}…`;
     results.push(await verifySingleStatement(sentences[i]));
-    await sleep(120); // be gentle with the Wikipedia API
+    await sleep(200); // be gentle with the Wikipedia API
   }
 
   $("progressWrap").hidden = true;
