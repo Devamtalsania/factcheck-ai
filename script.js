@@ -81,7 +81,7 @@ async function searchWikipedia(query) {
 }
 
 /* ---------- Score one candidate article against the user's sentence ---------- */
-function evaluateCandidate(candidate, words, stemmedWordSet) {
+function evaluateCandidate(candidate, words, stemmedWordSet, firstContentStem) {
   const subjectWords = new Set(
     (candidate.toLowerCase().match(/\w+/g) || []).filter((w) => w.length >= 3 && !GENERIC_TITLE_WORDS.has(w))
   );
@@ -99,7 +99,11 @@ function evaluateCandidate(candidate, words, stemmedWordSet) {
   );
   if (claimWords.size === 0) return null;
 
-  return { candidate, claimWords, sharedCount, coverage: sharedCount / subjectStems.size };
+  return {
+    candidate, claimWords, sharedCount,
+    coverage: sharedCount / subjectStems.size,
+    containsFirst: subjectStems.has(firstContentStem),
+  };
 }
 
 /* ---------- Core: verify one statement (port of verify_single_statement) ---------- */
@@ -132,24 +136,40 @@ async function verifySingleStatement(sentence) {
     }
 
     const stemmedWordSet = new Set(words.map(stem));
+    const contentWords = words.filter((w) => !STOPWORDS.has(w));
+    const firstContentStem = contentWords.length ? stem(contentWords[0]) : "";
     const rank = (list) =>
       list
-        .map((c) => evaluateCandidate(c, words, stemmedWordSet))
+        .map((c) => evaluateCandidate(c, words, stemmedWordSet, firstContentStem))
         .filter(Boolean)
-        .sort((a, b) => b.coverage - a.coverage || b.sharedCount - a.sharedCount);
+        // Best coverage first; ties go to the article containing the sentence's
+        // first content word (usually the real subject, e.g. "Sahara" over
+        // "South America", "Earth" over "Third from the Sun").
+        .sort((a, b) =>
+          b.coverage - a.coverage ||
+          (b.containsFirst ? 1 : 0) - (a.containsFirst ? 1 : 0) ||
+          b.sharedCount - a.sharedCount
+        );
 
     let ranked = rank(candidates);
 
-    // 3. If the best match is only a single-word subject (e.g. "India"), the real
-    //    subject may be a phrase the search missed (e.g. "President of India").
-    //    Search again without the first content word and merge the results.
-    if (!ranked[0] || ranked[0].sharedCount < 2) {
-      const contentWords = words.filter((w) => !STOPWORDS.has(w));
+    // 3. If no candidate matches a multi-word subject (e.g. only "India" matched,
+    //    not "President of India"), the real subject may be a phrase the search
+    //    missed. Try two alternate queries and merge all results.
+    if (!ranked.some((e) => e.sharedCount >= 2)) {
+      const seen = new Set(candidates);
+      const queries = [];
       if (contentWords.length >= 2) {
-        const extra = await searchWikipedia(contentWords.slice(1).join(" "));
-        const merged = [...candidates, ...extra.filter((c) => !candidates.includes(c))];
-        ranked = rank(merged);
+        queries.push(contentWords.slice(1).join(" "));    // drop first word: "president india right now"
+        queries.push(contentWords.slice(0, 2).join(" ")); // first two words: "albert einstein"
       }
+      for (const q of queries) {
+        const extra = await searchWikipedia(q);
+        for (const c of extra) {
+          if (!seen.has(c)) { seen.add(c); candidates.push(c); }
+        }
+      }
+      ranked = rank(candidates);
     }
 
     // 4. Try the best-ranked candidates until one yields a verdict
