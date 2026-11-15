@@ -16,7 +16,7 @@ const GENERIC_TITLE_WORDS = new Set(["group","company","inc","corporation","limi
 const PRONOUNS = new Set(["my","your","his","her","our","their","i","we","you"]);
 const MAX_WORDS = 3000;
 
-const SAMPLE_TEXT = "The Eiffel Tower is located in Paris, France. The Eiffel Tower is 330 metres tall. The Great Wall of China is visible from space with the naked eye. My cat is very cute. The Earth is flat. Albert Einstein developed the theory of relativity. The Sahara is the largest desert in the world.";
+const SAMPLE_TEXT = "The Eiffel Tower is located in Paris, France. The Eiffel Tower is 330 metres tall. The Great Wall of China is visible from space with the naked eye. Dhyan is the president of India. My cat is very cute. The Earth is flat. Albert Einstein developed the theory of relativity. The Sahara is the largest desert in the world.";
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -63,61 +63,86 @@ async function fetchJSON(url, timeoutMs = 15000) {
   }
 }
 
+/* ---------- Simple stemmer (handles plurals: presidents -> president) ---------- */
+function stem(w) {
+  if (w.length > 4 && w.endsWith("ies")) return w.slice(0, -3) + "y";
+  if (w.length > 3 && w.endsWith("es")) return w.slice(0, -2);
+  if (w.length > 3 && w.endsWith("s")) return w.slice(0, -1);
+  return w;
+}
+
 /* ---------- Core: verify one statement (port of verify_single_statement) ---------- */
 async function verifySingleStatement(sentence) {
   const clean = sentence.trim();
   const words = clean.toLowerCase().match(/\w+/g) || [];
+  const originalWords = clean.match(/\w+/g) || [];
 
-  if (words.length < 4) {
+  // 1. Too short to verify (short factual claims like "Dhyan is president" are allowed)
+  if (words.length < 3) {
     return { statement: clean, status: "NOT_WORTHY", reason: "Too short to be a verifiable claim." };
+  }
+  // 3-word statements need a proper noun or number, otherwise they're vague ("cat is dead")
+  if (words.length === 3) {
+    const hasSpecific = originalWords.some((w) => /^[A-Z]/.test(w) || /\d/.test(w));
+    if (!hasSpecific) {
+      return { statement: clean, status: "NOT_WORTHY", reason: "Too vague to be a verifiable claim." };
+    }
   }
   if (PRONOUNS.has(words[0])) {
     return { statement: clean, status: "NOT_WORTHY", reason: "Personal or vague statement, not an encyclopedic fact." };
   }
 
   try {
-    // 1. Search Wikipedia for the main topic
+    // 2. Search Wikipedia (full-text search, same as the Python wikipedia library)
+    //    Try the top 10 results, not just the first
     const searchUrl =
-      "https://en.wikipedia.org/w/api.php?action=opensearch&format=json&limit=1&namespace=0&origin=*" +
-      "&search=" + encodeURIComponent(clean);
+      "https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=10&origin=*" +
+      "&srsearch=" + encodeURIComponent(clean);
     const searchData = await fetchJSON(searchUrl);
-    if (!searchData[1] || searchData[1].length === 0) {
+    const candidates = (searchData.query && searchData.query.search || []).map((r) => r.title);
+    if (candidates.length === 0) {
       return { statement: clean, status: "NOT_WORTHY", reason: "No recognizable encyclopedic subject found." };
     }
-    const mainSubject = searchData[1][0];
 
-    // 2. Subject words must actually appear in the user's sentence
-    const subjectWords = new Set(
-      (mainSubject.toLowerCase().match(/\w+/g) || []).filter((w) => w.length >= 3 && !GENERIC_TITLE_WORDS.has(w))
-    );
-    const wordSet = new Set(words);
-    if (![...subjectWords].every((w) => wordSet.has(w))) {
-      return { statement: clean, status: "NOT_WORTHY", reason: "Statement lacks a clear, specific subject to fact-check." };
+    const stemmedWordSet = new Set(words.map(stem));
+
+    for (const candidate of candidates) {
+      // 3. Subject words must appear in the user's sentence (plurals tolerated)
+      const subjectWords = new Set(
+        (candidate.toLowerCase().match(/\w+/g) || []).filter((w) => w.length >= 3 && !GENERIC_TITLE_WORDS.has(w))
+      );
+      if (subjectWords.size === 0) continue;
+      const subjectStems = new Set([...subjectWords].map(stem));
+      const sharedCount = [...subjectStems].filter((s) => stemmedWordSet.has(s)).length;
+      const isFullMatch = sharedCount === subjectStems.size;
+      // Short sentences get a partial-match allowance (e.g. "Dhyan is president"
+      // should still match "President of India"); longer ones stay strict.
+      if (!isFullMatch && !(words.length <= 5 && sharedCount >= 1)) continue;
+
+      // 4. Extract the user's claim words
+      const claimWords = new Set(
+        words.filter((w) => w.length >= 2 && !STOPWORDS.has(w) && !subjectStems.has(stem(w)))
+      );
+      if (claimWords.size === 0) continue;
+
+      // 5. Fetch real facts (Wikipedia summary, first 3 sentences)
+      const summaryUrl =
+        "https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(candidate.replace(/ /g, "_"));
+      const summary = await fetchJSON(summaryUrl);
+      if (summary.type === "disambiguation" || !summary.extract) continue;
+
+      const realFacts = firstSentences(summary.extract, 3);
+      const realWords = new Set(realFacts.toLowerCase().match(/\w+/g) || []);
+      const matching = [...claimWords].filter((w) => realWords.has(w));
+      const accuracy = matching.length / claimWords.size;
+
+      if (accuracy >= 0.35) {
+        return { statement: clean, status: "TRUE", subject: candidate };
+      }
+      return { statement: clean, status: "FALSE", subject: candidate, correct_info: realFacts };
     }
 
-    // 3. Extract the user's claim words
-    const claimWords = new Set(words.filter((w) => w.length >= 4 && !STOPWORDS.has(w) && !subjectWords.has(w)));
-    if (claimWords.size === 0) {
-      return { statement: clean, status: "NOT_WORTHY", reason: "No specific factual claim detected about the subject." };
-    }
-
-    // 4. Fetch real facts (Wikipedia summary, first 3 sentences)
-    const summaryUrl =
-      "https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(mainSubject.replace(/ /g, "_"));
-    const summary = await fetchJSON(summaryUrl);
-    if (summary.type === "disambiguation" || !summary.extract) {
-      return { statement: clean, status: "NOT_WORTHY", reason: "Subject is too ambiguous or does not exist in the database." };
-    }
-
-    const realFacts = firstSentences(summary.extract, 3);
-    const realWords = new Set(realFacts.toLowerCase().match(/\w+/g) || []);
-    const matching = [...claimWords].filter((w) => realWords.has(w));
-    const accuracy = matching.length / claimWords.size;
-
-    if (accuracy >= 0.35) {
-      return { statement: clean, status: "TRUE", subject: mainSubject };
-    }
-    return { statement: clean, status: "FALSE", subject: mainSubject, correct_info: realFacts };
+    return { statement: clean, status: "NOT_WORTHY", reason: "Statement lacks a clear, specific subject to fact-check." };
   } catch (err) {
     return { statement: clean, status: "NOT_WORTHY", reason: "Could not reach Wikipedia (network error). Please try again." };
   }
